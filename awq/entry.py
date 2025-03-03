@@ -22,10 +22,11 @@ from awq.utils.utils import simple_dispatch_model
 from datasets import load_dataset
 from torch import nn
 import tqdm
+from awq.utils.prune import unstructured_pruning, structured_column_pruning, apply_custom_pruning
+from awq.utils.prune_finetune import prune_finetune
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model_path", type=str, help="path of the hf model")
-parser.add_argument("--dtype", type=str, default="float16", choices=["float16", "bfloat16"])
 parser.add_argument("--batch_size", type=int, default=1, help="batch size")
 parser.add_argument("--tasks", default=None, type=str)
 parser.add_argument("--output_path", default=None, type=str)
@@ -93,6 +94,16 @@ parser.add_argument(
     default=None,
     help="Path to save act scale",
 )
+#pruning
+parser.add_argument("--prune_ratio", type=float, default=0.5)
+parser.add_argument("--prune", action="store_true", help="perform awq search process")
+parser.add_argument("--prune_finetune", action="store_true", help="perform awq search process")
+parser.add_argument(
+    "--dump_prune", type=str, default=None, help="save the pruned results"
+)
+parser.add_argument(
+    "--load_prune", type=str, default=None, help="load the pruned results"
+)
 args = parser.parse_args()
 assert (
     args.act_scale_path is not None and len(args.media_path) > 0
@@ -119,8 +130,7 @@ print("Quantization config:", q_config)
 # build model and tokenizer
 
 
-def build_model_and_enc(model_path, dtype):
-    torch_dtype = torch.float16 if dtype == "float16" else torch.bfloat16
+def build_model_and_enc(model_path):
     if not os.path.exists(model_path):  # look into ssd
         raise FileNotFoundError(f"{model_path} not found!")
     print(f"* Building model {model_path}")
@@ -154,7 +164,7 @@ def build_model_and_enc(model_path, dtype):
         print("Loading pre-computed quantized weights...")
         with init_empty_weights():
             model = AutoModelForCausalLM.from_config(
-                config=config, torch_dtype=torch_dtype, trust_remote_code=True
+                config=config, torch_dtype=torch.float16, trust_remote_code=True
             )
         real_quantize_model_weight(
             model, w_bit=args.w_bit, q_config=q_config, init_only=True
@@ -187,15 +197,55 @@ def build_model_and_enc(model_path, dtype):
 
         model.eval()
     else:  # fp16 to quantized
-        args.run_awq &= not args.load_awq  # if load_awq, no need to run awq
-        # Init model on CPU:
-        kwargs = {"torch_dtype": torch_dtype, "low_cpu_mem_usage": True}
-        if not vila_10_quant_mode:
+        if args.load_prune:
+            print("Loading pruned weights from", args.load_prune)
+            #state_dict = torch.load(args.load_prune, map_location="cuda:0")
+            #model.load_state_dict(state_dict)
             model = AutoModelForCausalLM.from_pretrained(
-                model_path, config=config, trust_remote_code=True, **kwargs
+                args.load_prune,
+                trust_remote_code=True,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+                # If necessary, you can use a map_location function or argument here.
             )
+        else:
+            args.run_awq &= not args.load_awq  # if load_awq, no need to run awq
+            # Init model on CPU:
+            #if args.prune_finetune:
+            kwargs = {"torch_dtype": torch.bfloat16, "low_cpu_mem_usage": True, "device_map": "auto"} #hh, update to bfloat for llama finetuing
+            # pure prune + load awq
+            #kwargs = {"torch_dtype": torch.float16, "low_cpu_mem_usage": True, "device_map": "auto"}
+            # original cpu load
+            #kwargs = {"torch_dtype": torch.float16, "low_cpu_mem_usage": True}
+            if not vila_10_quant_mode:
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_path, config=config, trust_remote_code=True, **kwargs
+                )
+            print("\nModel from pretrained loaded ..", flush=True)
+            print("Model at device: ", next(model.parameters()).device)
 
         model.eval()
+
+        # Here to add pruning
+        if args.prune:
+            print("\n", flush=True)
+            print("Pruning ...", flush=True)
+            unstructured_pruning(model, amount=args.prune_ratio)
+            #structured_column_pruning(model, amount=args.prune_ratio)
+            #model = apply_custom_pruning(model, amount=args.prune_ratio)
+            #print("Model at device: ", next(model.parameters()).device)
+        if args.prune_finetune:
+            assert args.dump_prune, "Please save the awq results with --dump_prune"
+            print("\n", flush=True)
+            print("Prune finetuning ...", flush=True)
+            prune_finetune(model, enc, args.dump_prune)
+            if args.dump_prune:
+                # dirpath = os.path.dirname(args.dump_prune)
+                # os.makedirs(dirpath, exist_ok=True)
+                # torch.save(model.state_dict(), args.dump_prune)
+                print("Pruned weights saved at", args.dump_prune)
+            exit(0)
+            #model.eval()
 
         if args.run_awq:
             assert args.dump_awq, "Please save the awq results with --dump_awq"
@@ -294,7 +344,7 @@ def main():
     if args.dump_awq and os.path.exists(args.dump_awq):
         print(f"Found existing AWQ results {args.dump_awq}, exit.")
         exit()
-    model, enc = build_model_and_enc(args.model_path, args.dtype)
+    model, enc = build_model_and_enc(args.model_path)
 
     if args.tasks is not None:
         # https://github.com/IST-DASLab/gptq/blob/2d65066eeb06a5c9ff5184d8cebdf33662c67faf/llama.py#L206

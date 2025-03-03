@@ -1,3 +1,5 @@
+This repo adds pruning and LoRA finetuning into the AWQ pipeline. The target is to check pruning and LoRA can further compress the LLM and maintain the performance on top of AWQ strategies.
+
 # AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration 
 [[Paper](https://arxiv.org/abs/2306.00978)][[Slides](https://www.dropbox.com/scl/fi/dtnp6h6y1mnp7g036axu6/AWQ-slide.pdf?rlkey=ffgh50hxhx8dmsnjiu8kef0ou&dl=0)][[Video](https://youtu.be/3dYLj9vjfA0)]
 
