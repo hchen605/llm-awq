@@ -212,9 +212,9 @@ def build_model_and_enc(model_path):
             args.run_awq &= not args.load_awq  # if load_awq, no need to run awq
             # Init model on CPU:
             #if args.prune_finetune:
-            kwargs = {"torch_dtype": torch.bfloat16, "low_cpu_mem_usage": True, "device_map": "auto"} #hh, update to bfloat for llama finetuing
+            # kwargs = {"torch_dtype": torch.bfloat16, "low_cpu_mem_usage": True, "device_map": "auto"} #hh, update to bfloat for llama finetuing
             # pure prune + load awq
-            #kwargs = {"torch_dtype": torch.float16, "low_cpu_mem_usage": True, "device_map": "auto"}
+            kwargs = {"torch_dtype": torch.float16, "low_cpu_mem_usage": True, "device_map": "auto"}
             # original cpu load
             #kwargs = {"torch_dtype": torch.float16, "low_cpu_mem_usage": True}
             if not vila_10_quant_mode:

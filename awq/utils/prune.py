@@ -18,7 +18,7 @@ def unstructured_pruning(model, amount=0.5):
         # Only apply pruning to linear layers
         if isinstance(module, torch.nn.Linear):
             prune.l1_unstructured(module, name="weight", amount=amount)
-            #prune.remove(module, "weight")  # Remove pruning to leave a dense tensor
+            prune.remove(module, "weight")  # Remove pruning to leave a dense tensor
 
 import torch
 
