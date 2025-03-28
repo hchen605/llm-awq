@@ -84,7 +84,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_type", type=str, default="LLaMa", help="type of the model"
     )
-    parser.add_argument("--dtype", type=str, default="float16", choices=["float16", "bfloat16"])
     parser.add_argument(
         "--model_path",
         type=str,
@@ -129,13 +128,19 @@ if __name__ == "__main__":
         action="store_true",
         help="If used, in context stage, the history tokens will not be recalculated, greatly speeding up the calculation",
     )
+    # Define the --prompt argument (or any name you prefer)
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        required=True,
+        help="The input prompt for the script."
+    )
 
     args = parser.parse_args()
     assert args.model_type.lower() in [
         "llama",
         "falcon",
         "mpt",
-        "qwen",
     ], "We only support llama & falcon & mpt now"
     assert args.precision in ["W4A16", "W16A16"], "We only support W4A16/W16A16 now"
 
@@ -152,7 +157,7 @@ if __name__ == "__main__":
         print("=" * 80)
     # TODO (Haotian): a more elegant implementation here.
     # We need to update these global variables before models use them.
-    from tinychat.models import FalconForCausalLM, LlamaForCausalLM, MPTForCausalLM, Qwen2ForCausalLM
+    from tinychat.models import FalconForCausalLM, LlamaForCausalLM, MPTForCausalLM
 
     def skip(*args, **kwargs):
         pass
@@ -172,30 +177,23 @@ if __name__ == "__main__":
         tokenizer = AutoTokenizer.from_pretrained(
             args.model_path, use_fast=False, trust_remote_code=True
         )
-    torch_dtype = torch.float16 if args.dtype == "float16" else torch.bfloat16
     modeling_utils._init_weights = False
-    torch.set_default_dtype(torch_dtype)
+    torch.set_default_dtype(torch.half)
 
     model_type_dict = {
         "llama": LlamaForCausalLM,
         "falcon": FalconForCausalLM,
         "mpt": MPTForCausalLM,
-        "qwen": Qwen2ForCausalLM
     }
 
     if args.precision == "W4A16":
         if args.model_type.lower() == "llama":
-            model = model_type_dict["llama"](config).to(torch_dtype)
-            model = load_awq_llama_fast(
-                model, args.load_quant, 4, args.q_group_size, args.device
-            )
-        elif args.model_type.lower() == "qwen":
-            model = model_type_dict["qwen"](config).to(torch_dtype)
+            model = model_type_dict["llama"](config).half()
             model = load_awq_llama_fast(
                 model, args.load_quant, 4, args.q_group_size, args.device
             )
         else:
-            model = model_type_dict[args.model_type.lower()](config).to(torch_dtype)
+            model = model_type_dict[args.model_type.lower()](config).half()
             model = load_awq_model(
                 model, args.load_quant, 4, args.q_group_size, args.device
             )
@@ -203,10 +201,10 @@ if __name__ == "__main__":
         loaded_model = AutoModelForCausalLM.from_pretrained(
             args.model_path,
             config=config,
-            torch_dtype=torch_dtype,
+            torch_dtype=torch.float16,
             trust_remote_code=True,
         )
-        model = model_type_dict[args.model_type.lower()](config).to(torch_dtype).to(args.device)
+        model = model_type_dict[args.model_type.lower()](config).half().to(args.device)
         model.load_state_dict(loaded_model.state_dict())
     # device warm up
     device_warmup(args.device)
@@ -217,9 +215,12 @@ if __name__ == "__main__":
     # TODO (Haotian): Verify if the StreamGenerator still works for the unmodified falcon impl.
     stream_generator = StreamGenerator
 
+    #import sys
+    #sys.path.insert(0, '/home/hsin/llm-awq/tinychat')
     # Optimize AWQ quantized model
-    if args.precision == "W4A16" and (args.model_type.lower() == "llama" or args.model_type.lower() == "qwen"):
-        from tinychat.modules import make_quant_norm, make_quant_attn
+    if args.precision == "W4A16" and args.model_type.lower() == "llama":
+        #from tinychat.modules import make_quant_norm, make_quant_attn
+        from modules import make_quant_norm, make_quant_attn
 
         if args.flash_attn:
             make_quant_attn(model, args.device, args.flash_attn)
@@ -227,7 +228,7 @@ if __name__ == "__main__":
             make_quant_attn(model, args.device)
         make_quant_norm(model)
     model(
-        torch.randint(0, 1000, (1, 4096), dtype=torch.int, device="cuda:0"),
+        torch.randint(0, 1000, (1, 2048), dtype=torch.int, device="cuda:0"), #update to 2048 for llama 3
         0,
         quant=args.precision == "W4A16",
     )
@@ -240,31 +241,32 @@ if __name__ == "__main__":
     count = 0
     start_pos = 0
     print("=" * 50)
-    while True:
-        # Get input from the user
-        input_prompt = input("USER: ")
-        if input_prompt == "":
-            print("EXIT...")
-            break
-        model_prompter.insert_prompt(input_prompt)
-        output_stream = stream_generator(
-            model,
-            tokenizer,
-            model_prompter.model_input,
-            start_pos,
-            gen_params,
-            device=args.device,
-            stop_token_ids=stop_token_ids,
-            chunk_prefilling=args.chunk_prefilling,
-            quant_llm=args.precision == "W4A16",
-        )
-        outputs, total_tokens = stream_output(output_stream)
-        if args.chunk_prefilling:
-            start_pos += total_tokens
-        else:
-            start_pos = 0
-        if (
-            args.single_round is not True and args.max_seq_len > 512
-        ):  # Only memorize previous conversations when kv_cache_size > 512
-            model_prompter.update_template(outputs, args.chunk_prefilling)
-        count += 1
+    #while True:
+    # Get input from the user
+    input_prompt = args.prompt
+    # input_prompt = input("USER: ")
+    # if input_prompt == "":
+    #     print("EXIT...")
+    #     break
+    model_prompter.insert_prompt(input_prompt)
+    output_stream = stream_generator(
+        model,
+        tokenizer,
+        model_prompter.model_input,
+        start_pos,
+        gen_params,
+        device=args.device,
+        stop_token_ids=stop_token_ids,
+        chunk_prefilling=args.chunk_prefilling,
+        quant_llm=args.precision == "W4A16",
+    )
+    outputs, total_tokens = stream_output(output_stream)
+    if args.chunk_prefilling:
+        start_pos += total_tokens
+    else:
+        start_pos = 0
+    if (
+        args.single_round is not True and args.max_seq_len > 512
+    ):  # Only memorize previous conversations when kv_cache_size > 512
+        model_prompter.update_template(outputs, args.chunk_prefilling)
+    count += 1
